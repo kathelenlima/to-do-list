@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_session import Session
 from flask_sqlalchemy import SQLAlchemy
 import redis
@@ -6,6 +6,8 @@ from sqlalchemy import text
 from marshmallow import Schema, fields, validate, ValidationError
 from sqlalchemy.exc import DataError
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+import bleach
 
 app = Flask(__name__)
 
@@ -18,8 +20,11 @@ app.config['SESSION_USE_SIGNER'] = True
 app.config['SESSION_KEY_PREFIX'] = 'sess:'
 app.config['SESSION_REDIS'] = redis.StrictRedis(host='172.20.96.194', port=6379, db=0)
 
+app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'  
+
 db = SQLAlchemy(app)
 Session(app)
+jwt = JWTManager(app)
 
 CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
@@ -73,14 +78,17 @@ def listar_tarefas():
         return f"Erro: {e}"
 
 @app.route('/tarefas', methods=['GET'])
+@jwt_required()
 def listar():
     tarefas = Tarefa.query.all()
     return jsonify([{'id': tarefa.id, 'descricao': tarefa.descricao, 'status': tarefa.status} for tarefa in tarefas])
 
 @app.route('/tarefas', methods=['POST'])
+@jwt_required()
 def adicionar():
     dados = request.json
     try:
+        dados['descricao'] = bleach.clean(dados['descricao'])  
         tarefas_valid.load(dados)
     except ValidationError as err:
         return jsonify(err.messages), 400
@@ -101,10 +109,12 @@ def adicionar():
     return jsonify({'id': nova_tarefa.id, 'descricao': nova_tarefa.descricao, 'status': nova_tarefa.status}), 201
 
 @app.route('/tarefas/<int:tarefa_id>', methods=['PUT'])
+@jwt_required()
 def atualizar(tarefa_id):
     tarefa = Tarefa.query.get_or_404(tarefa_id)
     dados = request.json
     try:
+        dados['descricao'] = bleach.clean(dados['descricao'])  
         tarefas_valid.load(dados, partial=True)
     except ValidationError as err:
         return jsonify(err.messages), 400
@@ -115,6 +125,7 @@ def atualizar(tarefa_id):
     return jsonify({'id': tarefa.id, 'descricao': tarefa.descricao, 'status': tarefa.status})
 
 @app.route('/tarefas/<int:tarefa_id>', methods=['DELETE'])
+@jwt_required()
 def remover(tarefa_id):
     tarefa = Tarefa.query.get_or_404(tarefa_id)
     db.session.delete(tarefa)
@@ -124,19 +135,29 @@ def remover(tarefa_id):
 @app.route('/test_redis', methods=['GET'])
 def test_redis():
     try:
-        cache = redis.StrictRedis(host='localhost', port=6379, db=1)
+        cache = redis.StrictRedis(host='172.20.96.194', port=6379, db=1)
         cache.set('test_key', 'test_value')
         value = cache.get('test_key')
         return jsonify({'status': 'success', 'value': value.decode('utf-8')}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.json.get('username', None)
+    password = request.json.get('password', None)
+    if username != 'admin' or password != 'password':  
+        return jsonify({"msg": "Bad username or password"}), 401
+
+    access_token = create_access_token(identity=username)
+    return jsonify(access_token=access_token)
+
 @app.route('/')
 def home():
     return render_template('index.html')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, ssl_context='adhoc')  
 
 def test_redis(client):
     response = client.get('/test_redis')
